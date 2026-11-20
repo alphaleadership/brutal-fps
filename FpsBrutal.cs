@@ -242,14 +242,23 @@ void Run(bool selftest)
     // 4 armes hitscan différentes (roue au clic droit, ou touches 1-4).
     var weapons = new[]
     {
-        new Weapon("Pistolet", 0.11, 14f, 1, 0.0f, 1, new float3(0.75f, 0.75f, 0.8f)),
-        new Weapon("SMG", 0.065, 6f, 1, 0.035f, 1, new float3(0.3f, 0.6f, 1.0f)),
-        new Weapon("Pompe", 0.75, 9f, 6, 0.09f, 1, new float3(1.0f, 0.55f, 0.2f)),
-        new Weapon("Sniper", 1.3, 45f, 1, 0.0f, 3, new float3(0.8f, 0.3f, 1.0f)),
+        new Weapon("Pistolet", 0.11, 14f, 1, 0.0f, 1, new float3(0.75f, 0.75f, 0.8f), 12, 60, 0.9),
+        new Weapon("SMG", 0.065, 6f, 1, 0.035f, 1, new float3(0.3f, 0.6f, 1.0f), 30, 120, 1.4),
+        new Weapon("Pompe", 0.75, 9f, 6, 0.09f, 1, new float3(1.0f, 0.55f, 0.2f), 6, 24, 2.0),
+        new Weapon("Sniper", 1.3, 45f, 1, 0.0f, 3, new float3(0.8f, 0.3f, 1.0f), 5, 20, 2.2),
     };
     var currentWeapon = 0;
     var selectedSlot = 0;
     var wheelOpen = false;
+    // Munitions par arme : chargeur + réserve. Rechargement avec R (ou auto si chargeur vide).
+    var magAmmo = new int[weapons.Length];
+    var reserveAmmo = new int[weapons.Length];
+    for (var i = 0; i < weapons.Length; i++)
+    {
+        magAmmo[i] = weapons[i].MagSize;
+        reserveAmmo[i] = weapons[i].StartReserve;
+    }
+    var reloadingUntil = 0.0;
 
     // Gadgets : E = utiliser, molette souris = changer. Grenade / Dash / Jetpack.
     var gadgets = new[] { "Grenade", "Dash", "Jetpack" };
@@ -354,8 +363,31 @@ void Run(bool selftest)
     for (var i = 0; i < weapons.Length; i++)
         weaponNames[i] = weapons[i].Name.ToUpperInvariant();
 
-    // Construit les quads du texte des 4 secteurs, centrés à r=0.30 sur l'angle médian de chaque secteur.
+    // Ajoute du texte (mini-font 5x7) au buffer de quads, retourne le nouveau nombre de sommets.
     const float PX = 0.016f;
+    int AddText(float2[] buf, int n, string text, float x0, float y0, float px)
+    {
+        for (var i = 0; i < text.Length; i++)
+        {
+            var g = Glyph(text[i]);
+            for (var l = 0; l < 7; l++)
+                for (var c = 0; c < 5; c++)
+                    if (((g[l] >> (4 - c)) & 1) == 1 && n < buf.Length - 6)
+                    {
+                        var x = x0 + i * 6 * px + c * px;
+                        var y = y0 + (6 - l) * px; // ligne 0 du glyphe en haut (NDC y-up)
+                        buf[n++] = new float2(x, y);
+                        buf[n++] = new float2(x + px, y);
+                        buf[n++] = new float2(x + px, y + px);
+                        buf[n++] = new float2(x, y);
+                        buf[n++] = new float2(x + px, y + px);
+                        buf[n++] = new float2(x, y + px);
+                    }
+        }
+        return n;
+    }
+
+    // Construit les quads du texte des 4 secteurs, centrés à r=0.30 sur l'angle médian de chaque secteur.
     int BuildLabels()
     {
         var n = 0;
@@ -367,23 +399,7 @@ void Run(bool selftest)
             var text = weaponNames[s];
             var x0 = cx - (text.Length * 6 * PX - PX) / 2;
             var y0 = cy - 3.5f * PX;
-            for (var i = 0; i < text.Length; i++)
-            {
-                var g = Glyph(text[i]);
-                for (var l = 0; l < 7 && n < labelBuf.Length - 6; l++)
-                    for (var c = 0; c < 5; c++)
-                        if (((g[l] >> (4 - c)) & 1) == 1)
-                        {
-                            var x = x0 + i * 6 * PX + c * PX;
-                            var y = y0 + (6 - l) * PX; // ligne 0 du glyphe en haut (NDC y-up)
-                            labelBuf[n++] = new float2(x, y);
-                            labelBuf[n++] = new float2(x + PX, y);
-                            labelBuf[n++] = new float2(x + PX, y + PX);
-                            labelBuf[n++] = new float2(x, y);
-                            labelBuf[n++] = new float2(x + PX, y + PX);
-                            labelBuf[n++] = new float2(x, y + PX);
-                        }
-            }
+            n = AddText(labelBuf, n, text, x0, y0, PX);
         }
         return n;
     }
@@ -398,6 +414,7 @@ void Run(bool selftest)
     var shootQueued = false;
     var jumpQueued = false;
     var gadgetQueued = false;
+    var reloadQueued = false;
 
     if (!selftest)
     {
@@ -427,7 +444,7 @@ void Run(bool selftest)
             else if (wheelOpen)
             {
                 wheelOpen = false;
-                currentWeapon = selectedSlot; // on équipe l'arme pointée
+                EquipWeapon(selectedSlot); // on équipe l'arme pointée
             }
         }
     };
@@ -444,11 +461,20 @@ void Run(bool selftest)
             handle.ShouldClose = true;
         else if (key == GlfwKey.E)
             gadgetQueued = true;
-        else if (key == GlfwKey.Number1) currentWeapon = 0;
-        else if (key == GlfwKey.Number2) currentWeapon = 1;
-        else if (key == GlfwKey.Number3) currentWeapon = 2;
-        else if (key == GlfwKey.Number4) currentWeapon = 3;
+        else if (key == GlfwKey.R)
+            reloadQueued = true;
+        else if (key == GlfwKey.Number1) EquipWeapon(0);
+        else if (key == GlfwKey.Number2) EquipWeapon(1);
+        else if (key == GlfwKey.Number3) EquipWeapon(2);
+        else if (key == GlfwKey.Number4) EquipWeapon(3);
     };
+
+    void EquipWeapon(int i)
+    {
+        currentWeapon = i;
+        selectedSlot = i;
+        reloadingUntil = 0; // changer d'arme annule le rechargement
+    }
 
     // ============================== État du jeu ==============================
     var score = 0;
@@ -476,9 +502,26 @@ void Run(bool selftest)
         return float3.Dot(d, d) > 1e-8f ? d : new float3(0, 0, -1);
     }
 
+    void StartReload(double now)
+    {
+        var w = weapons[currentWeapon];
+        if (reloadingUntil > 0 || magAmmo[currentWeapon] >= w.MagSize || reserveAmmo[currentWeapon] <= 0)
+            return;
+        reloadingUntil = now + w.ReloadTime;
+    }
+
     void Shoot(double now)
     {
         var w = weapons[currentWeapon];
+        if (reloadingUntil > 0)
+            return; // on ne tire pas pendant le rechargement
+        if (magAmmo[currentWeapon] <= 0)
+        {
+            nextShotAt = now + 0.2; // clic à vide
+            StartReload(now); // auto-reload si le chargeur est vide
+            return;
+        }
+        magAmmo[currentWeapon]--;
         shots++;
         nextShotAt = now + w.Cadence;
         recoil = 1f;
@@ -565,6 +608,7 @@ void Run(bool selftest)
             captureAt = frames + 8; // on prendra une capture 8 frames plus tard pour voir les débris
             Console.WriteLine($"  💥 frame {frames}: cible #{targets.IndexOf(t)} détruite à ({pos.X:F1},{pos.Y:F1},{pos.Z:F1}) -> 10 débris");
         }
+        reserveAmmo[currentWeapon] += 12; // munitions récupérées sur la cible
     }
 
     void UseGadget(double now)
@@ -814,6 +858,23 @@ void Run(bool selftest)
             UseGadget(now);
         }
 
+        // --- rechargement (touche R ou auto) ---
+        if (reloadQueued)
+        {
+            reloadQueued = false;
+            StartReload(now);
+        }
+        if (reloadingUntil > 0 && now >= reloadingUntil)
+        {
+            var w = weapons[currentWeapon];
+            var take = Math.Min(w.MagSize - magAmmo[currentWeapon], reserveAmmo[currentWeapon]);
+            magAmmo[currentWeapon] += take;
+            reserveAmmo[currentWeapon] -= take;
+            reloadingUntil = 0;
+            if (selftest)
+                Console.WriteLine($"  🔃 frame {frames}: rechargé {weapons[currentWeapon].Name} -> {magAmmo[currentWeapon]}/{reserveAmmo[currentWeapon]}");
+        }
+
         // --- respawn des cibles (repositionnées si juste touchées, recréées si détruites) + cleanup débris ---
         for (var i = 0; i < targets.Count; i++)
         {
@@ -952,6 +1013,29 @@ void Run(bool selftest)
         crossVao.Bind();
         OpenGl.Draw(GlTopology.Lines, 8, 1, 0, 0);
 
+        // HUD munitions en bas à droite : nom de l'arme + chargeur/réserve (+ RELOAD si en cours)
+        {
+            const float HPX = 0.009f;
+            var line1 = weaponNames[currentWeapon];
+            var line2 = $"{magAmmo[currentWeapon]}/{reserveAmmo[currentWeapon]}";
+            var line3 = reloadingUntil > 0 ? "RELOAD" : "";
+            var hn = AddText(labelBuf, 0, line1, 0.55f, -0.80f, HPX);
+            hn = AddText(labelBuf, hn, line2, 0.55f, -0.88f, HPX);
+            if (line3.Length > 0)
+                hn = AddText(labelBuf, hn, line3, 0.55f, -0.96f, HPX);
+            textVbo.Bind(GlBindTarget.ArrayBuffer);
+            OpenGl.BufferData(GlBindTarget.ArrayBuffer, labelBuf.AsSpan(0, hn), GlBufferUsage.DynamicDraw);
+            textVao.Bind();
+            overlayProgram.Uniform(
+                "color"u8,
+                reloadingUntil > 0
+                    ? new float4(1f, 0.7f, 0.2f, 1f)
+                    : magAmmo[currentWeapon] == 0
+                        ? new float4(1f, 0.25f, 0.25f, 1f)
+                        : new float4(1f, 1f, 1f, 1f));
+            OpenGl.Draw(GlTopology.Triangles, hn, 1, 0, 0);
+        }
+
         // flash d'explosion plein écran (alpha décroissant)
         if (now < explosionFlashUntil)
         {
@@ -1013,7 +1097,7 @@ void Run(bool selftest)
         OpenGl.Enable(GlCapability.DepthTest);
 
         // En selftest, on sauvegarde des frames du framebuffer en PNG (preuve du rendu).
-        if (selftest && (frames is 30 or 150 or 420 or 600 || frames == captureAt))
+        if (selftest && (frames is 30 or 150 or 310 or 420 or 600 || frames == captureAt))
         {
             var pixels = new byte[WIDTH * HEIGHT * 4];
             unsafe
@@ -1160,8 +1244,11 @@ static byte[] Glyph(char c) => char.ToUpperInvariant(c) switch
 
 record struct Vertex(float3 Position, float3 Normal);
 
-// Une arme hitscan : cadence (s), impulsion par balle, nombre de pellets, dispersion, dégâts, couleur (roue).
-sealed record Weapon(string Name, double Cadence, float Impulse, int Pellets, float Spread, int Damage, float3 Color);
+// Une arme hitscan : cadence (s), impulsion, pellets, dispersion, dégâts, couleur (roue),
+// chargeur (MagSize), réserve de départ, durée de rechargement.
+sealed record Weapon(
+    string Name, double Cadence, float Impulse, int Pellets, float Spread, int Damage, float3 Color,
+    int MagSize, int StartReserve, double ReloadTime);
 
 sealed class Target(uint body, float3 half, float3 color)
 {

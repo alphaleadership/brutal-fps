@@ -38,19 +38,24 @@ dotnet publish FpsBrutal.cs -c Release -r win-x64 --self-contained true -p:Publi
 ```
 
 Contrôles : **WASD** bouger, **souris** viser, **clic gauche** tirer, **clic droit maintenu** = roue des armes,
-**1-4** = arme directe, **espace** sauter, **shift** sprint, **E** = gadget, **molette** = changer de gadget,
-**Échap** quitter. Le score, l'arme et le gadget s'affichent dans le titre de la fenêtre.
+**1-4** = arme directe, **R** = recharger, **espace** sauter, **shift** sprint, **E** = gadget,
+**molette** = changer de gadget, **Échap** quitter. Le score/arme/gadget s'affichent dans le titre de la fenêtre,
+et le **compteur de munitions (chargeur/réserve) est affiché à l'écran en bas à droite** (orange = rechargement,
+rouge = chargeur vide).
 
 ### Roue des armes (4 armes hitscan)
 
 Le **nom de chaque arme est écrit sur son secteur** (mini-font 5x7 vectoriel maison, sans dépendance).
 
-| Slot | Arme | Cadence | Particularité |
-| --- | --- | --- | --- |
-| haut | Pistolet | 0.11 s | 1 balle, dégâts 1 |
-| gauche | SMG | 0.065 s | rafale, dispersion faible |
-| bas | Pompe | 0.75 s | 6 pellets, grosse dispersion, impulsion forte |
-| droite | Sniper | 1.3 s | 1 balle, dégâts 3, impulsion 45 |
+| Slot | Arme | Cadence | Chargeur/réserve | Rechargement | Particularité |
+| --- | --- | --- | --- | --- | --- |
+| haut | Pistolet | 0.11 s | 12 / 60 | 0.9 s | 1 balle, dégâts 1 |
+| gauche | SMG | 0.065 s | 30 / 120 | 1.4 s | rafale, dispersion faible |
+| bas | Pompe | 0.75 s | 6 / 24 | 2.0 s | 6 pellets, grosse dispersion |
+| droite | Sniper | 1.3 s | 5 / 20 | 2.2 s | 1 balle, dégâts 3, impulsion 45 |
+
+Chaque arme a ses propres munitions. **R** recharge (auto aussi si le chargeur est vide en tirant) ;
+changer d'arme annule le rechargement. Détruire une cible rapporte **+12 munitions** pour l'arme courante.
 
 ### Gadgets (touche E, molette pour cycler)
 
