@@ -76,8 +76,10 @@ Dernier run : `SELFTEST DONE frames=901 score=30 shots=36 hits=32`.
 
 - Joueur = capsule dynamique Jolt (gravité, saut détecté par raycast vers le bas, rotation verrouillée)
 - Arène 40×40 : sol, 4 murs, 4 piliers, 3 plateformes (tous des boxes statiques Jolt)
-- 8 cibles dynamiques : un tir (raycast Jolt depuis la caméra) leur applique une impulsion,
-  incremente le score, et elles respawnent en l'air 2 s plus tard
+- 8 cibles dynamiques avec **PV (5)** : chaque tir (raycast Jolt) leur enlève des dégâts et leur
+  applique une impulsion. À 0 PV, la cible est **détruite** : elle explose en **10 débris physiques**
+  (petits cubes Jolt lancés dans toutes les directions, visibles 2.5 s) et respawn 3 s plus tard.
+  La grenade fait aussi des dégâts de zone (2 dégâts si proche) et peut détruire les cibles.
 - Roue des armes 2D (anneau de 4 secteurs en NDC, blend alpha, pointeur souris) au clic droit maintenu
 - Gadgets : grenade physique Jolt avec explosion à onde de choc radiale + flash écran, dash, jetpack
 - Rendu : programme GLSL éclairé (Phong) pour la scène, programme "flat" pour le tracer/flash,

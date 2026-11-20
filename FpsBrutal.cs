@@ -258,6 +258,8 @@ void Run(bool selftest)
     var jetpackUntil = 0.0;
     var explosionFlashUntil = 0.0;
     var grenades = new List<(uint Body, double ExplodeAt)>();
+    var debris = new List<(uint Body, double RemoveAt, float3 Half, float3 Color)>(); // éclats des cibles détruites
+    const int TARGET_HP = 5;
 
     // ============================== Géométrie ==============================
     var cube = BuildCube();
@@ -458,6 +460,8 @@ void Run(bool selftest)
     var tracerFrom = float3.Zero;
     var tracerTo = float3.Zero;
     var recoil = 0f;
+    var frames = 0;
+    var captureAt = -1; // frame à capturer juste après une destruction de cible (selftest)
 
     float3 Eye()
     {
@@ -511,14 +515,55 @@ void Run(bool selftest)
             tracerUntil = now + 0.09;
             bodyInterface.AddImpulse(hit.BodyID, dir * w.Impulse, impact); // le tir repousse ce qu'il touche
 
-            var idx = targets.FindIndex(t => t.Body == hit.BodyID);
+            var idx = targets.FindIndex(t => t.Alive && t.Body == hit.BodyID);
             if (idx >= 0)
             {
+                var t = targets[idx];
+                t.Hp -= w.Damage;
                 score += w.Damage;
-                targets[idx].RespawnAt = now + 2.0; // la cible réapparaît ailleurs 2 s plus tard
+                if (t.Hp <= 0)
+                    DestroyTarget(t, now, dir);
             }
             if (selftest && shots <= 3 && idx >= 0)
-                Console.WriteLine($"  shot#{shots} [{w.Name}] -> TARGET#{idx} frac={hit.Fraction:F3}");
+                Console.WriteLine($"  shot#{shots} [{w.Name}] -> TARGET#{idx} hp={targets[idx].Hp} frac={hit.Fraction:F3}");
+        }
+    }
+
+    // Détruit une cible : elle explose en 10 débris physiques qui volent, puis respawn 3 s plus tard.
+    void DestroyTarget(Target t, double now, float3 hitDir)
+    {
+        if (!t.Alive)
+            return;
+        t.Alive = false;
+        t.RespawnAt = now + 3.0;
+        score += 5;
+        var pos = bodyInterface.GetPosition(t.Body);
+        for (var i = 0; i < 10; i++)
+        {
+            using var shape = BoxShapeSettings.Create(new float3(0.12f), 0.02f, default);
+            var p = pos + new float3(
+                (float)(rng.NextDouble() - 0.5) * 0.6f,
+                (float)(rng.NextDouble() - 0.5) * 0.6f,
+                (float)(rng.NextDouble() - 0.5) * 0.6f);
+            using var settings = BodyCreationSettings.Create(
+                shape, p,
+                floatQuat.CreateFromYawPitchRoll((float)(rng.NextDouble() * 6.28), (float)(rng.NextDouble() * 6.28), 0),
+                MotionType.Dynamic, LAYER_MOVING);
+            var b = bodyInterface.CreateAndAddBody(settings, Activation.Activate);
+            bodyInterface.SetLinearVelocity(
+                b,
+                hitDir * 6f + new float3(
+                    (float)(rng.NextDouble() - 0.5) * 8f,
+                    (float)rng.NextDouble() * 7f,
+                    (float)(rng.NextDouble() - 0.5) * 8f));
+            debris.Add((b, now + 2.5, new float3(0.12f), t.Color));
+        }
+        bodyInterface.RemoveBody(t.Body);
+        bodyInterface.DestroyBody(t.Body);
+        if (selftest)
+        {
+            captureAt = frames + 8; // on prendra une capture 8 frames plus tard pour voir les débris
+            Console.WriteLine($"  💥 frame {frames}: cible #{targets.IndexOf(t)} détruite à ({pos.X:F1},{pos.Y:F1},{pos.Z:F1}) -> 10 débris");
         }
     }
 
@@ -572,10 +617,12 @@ void Run(bool selftest)
                 {
                     var dir = dist > 1e-3f ? d / dist : float3.UnitY;
                     bodyInterface.AddImpulse(t.Body, dir * 40f * (1f - dist / 7f) + new float3(0, 12f, 0), tp);
-                    if (dist < 4.5f)
+                    if (dist < 4.5f && t.Alive)
                     {
+                        t.Hp -= 2;
                         score += 2;
-                        t.RespawnAt = now + 2.0;
+                        if (t.Hp <= 0)
+                            DestroyTarget(t, now, dir);
                     }
                 }
             }
@@ -608,7 +655,6 @@ void Run(bool selftest)
     var simTime = 0.0;
     var prevTime = selftest ? 0.0 : Glfw.Time;
     var accumulator = 0.0;
-    var frames = 0;
     var fpsTimer = 0.0;
     var fpsCount = 0;
     var fps = 0.0;
@@ -768,15 +814,37 @@ void Run(bool selftest)
             UseGadget(now);
         }
 
-        // --- respawn des cibles touchées ---
+        // --- respawn des cibles (repositionnées si juste touchées, recréées si détruites) + cleanup débris ---
         for (var i = 0; i < targets.Count; i++)
         {
             var t = targets[i];
             if (t.RespawnAt > 0 && now >= t.RespawnAt)
             {
                 t.RespawnAt = 0;
-                bodyInterface.SetPositionAndRotation(t.Body, RandomSpot(rng, 4f), floatQuat.Identity, Activation.Activate);
-                bodyInterface.SetLinearVelocity(t.Body, float3.Zero);
+                var pos = RandomSpot(rng, 4f);
+                if (t.Alive)
+                {
+                    bodyInterface.SetPositionAndRotation(t.Body, pos, floatQuat.Identity, Activation.Activate);
+                    bodyInterface.SetLinearVelocity(t.Body, float3.Zero);
+                }
+                else
+                {
+                    using var shape = BoxShapeSettings.Create(t.Half, 0.05f, default);
+                    using var settings = BodyCreationSettings.Create(shape, pos, floatQuat.Identity, MotionType.Dynamic, LAYER_MOVING);
+                    t.Body = bodyInterface.CreateAndAddBody(settings, Activation.Activate);
+                    t.Alive = true;
+                    t.Hp = TARGET_HP;
+                }
+            }
+        }
+        for (var i = debris.Count - 1; i >= 0; i--)
+        {
+            var (db, removeAt, _, _) = debris[i];
+            if (now >= removeAt)
+            {
+                debris.RemoveAt(i);
+                bodyInterface.RemoveBody(db);
+                bodyInterface.DestroyBody(db);
             }
         }
 
@@ -815,6 +883,14 @@ void Run(bool selftest)
             var model = float4x4.CreateScale(0.18f) * float4x4.CreateTranslation(gp);
             litProgram.Uniform("model"u8, model);
             litProgram.Uniform("color"u8, new float3(0.1f, 0.1f, 0.12f));
+            OpenGl.Draw(GlTopology.Triangles, cube.Length, 1, 0, 0);
+        }
+        foreach (var (db, _, half, col) in debris) // éclats des cibles détruites
+        {
+            bodyInterface.GetPositionAndRotation(db, out var pos, out var rot);
+            var model = float4x4.CreateScale(half) * float4x4.CreateFromQuaternion(rot) * float4x4.CreateTranslation(pos);
+            litProgram.Uniform("model"u8, model);
+            litProgram.Uniform("color"u8, col);
             OpenGl.Draw(GlTopology.Triangles, cube.Length, 1, 0, 0);
         }
 
@@ -937,7 +1013,7 @@ void Run(bool selftest)
         OpenGl.Enable(GlCapability.DepthTest);
 
         // En selftest, on sauvegarde des frames du framebuffer en PNG (preuve du rendu).
-        if (selftest && frames is 30 or 150 or 420 or 600)
+        if (selftest && (frames is 30 or 150 or 420 or 600 || frames == captureAt))
         {
             var pixels = new byte[WIDTH * HEIGHT * 4];
             unsafe
@@ -972,8 +1048,12 @@ void Run(bool selftest)
             var gadget = $"{gadgets[currentGadget]} (E, molette=switch)";
             if (now < nextGadgetAt)
                 gadget += $" cd {nextGadgetAt - now:F1}s";
+            var alive = 0;
+            foreach (var t in targets)
+                if (t.Alive)
+                    alive++;
             window.Title =
-                $"BRUTAL FPS — {arme} — gadget: {gadget} — score {score} — {shots} tirs / {hits} touchés — {fps:F0} FPS";
+                $"BRUTAL FPS — {arme} — gadget: {gadget} — score {score} — cibles {alive}/{targets.Count} — {shots} tirs / {hits} touchés — {fps:F0} FPS";
         }
     }
 
@@ -990,6 +1070,11 @@ void Run(bool selftest)
     {
         bodyInterface.RemoveBody(gb);
         bodyInterface.DestroyBody(gb);
+    }
+    foreach (var (db, _, _, _) in debris)
+    {
+        bodyInterface.RemoveBody(db);
+        bodyInterface.DestroyBody(db);
     }
     foreach (var t in targets)
     {
@@ -1084,4 +1169,6 @@ sealed class Target(uint body, float3 half, float3 color)
     public float3 Half = half;
     public float3 Color = color;
     public double RespawnAt;
+    public int Hp = 5;
+    public bool Alive = true;
 }
