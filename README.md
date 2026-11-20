@@ -2,7 +2,11 @@
 
 Petit jeu de tir à la première personne construit **from scratch** sur le framework
 [BRUTAL](https://github.com/ahwootech/BRUTAL) (Ahwoo / RocketWerkz), en un seul fichier C#
-(`FpsBrutal.cs`, ~600 lignes, lancer avec `dotnet run` directement sur le fichier).
+(`FpsBrutal.cs`, lancer avec `dotnet run` directement sur le fichier, ou l'exe précompilé).
+
+Ce repo est **indépendant du fork de BRUTAL** : le framework est utilisé uniquement via ses
+packages NuGet (`Ahwoo.Brutal.*`), aucune source de BRUTAL n'est copiée ici. Le fork local
+(`E:\brutal-test`, clone de `ahwootech/BRUTAL`) sert à lire les samples et la source.
 
 ## Stack (packages NuGet `Ahwoo.Brutal.*`)
 
@@ -21,7 +25,7 @@ Petit jeu de tir à la première personne construit **from scratch** sur le fram
 les DLL natives `glad/glfw3/jolt/stb.dll` sont à côté de l'exe, ne les sépare pas) :
 
 ```sh
-fps\publish\FpsBrutal.exe
+publish\FpsBrutal.exe
 ```
 
 Ou depuis les sources (prérequis : .NET 10 SDK, installé ici dans `E:\dotnet`, dans le PATH) :
