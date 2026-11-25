@@ -116,6 +116,29 @@ const string OverlayFrag = """
     }
     """;
 
+const string TexVert = """
+    #version 410 core
+    layout (location = 0) in vec2 aPos;
+    layout (location = 1) in vec2 aUv;
+    out vec2 uv;
+    void main()
+    {
+        uv = aUv;
+        gl_Position = vec4(aPos, 0.0, 1.0);
+    }
+    """;
+
+const string TexFrag = """
+    #version 410 core
+    uniform sampler2D tex;
+    in vec2 uv;
+    out vec4 FragColor;
+    void main()
+    {
+        FragColor = texture(tex, uv);
+    }
+    """;
+
 // Jolt a besoin d'un allocator, d'une factory et de ses types enregistrés avant toute simulation.
 Jolt.RegisterDefaultAllocator();
 Factory.Instance = Factory.Create();
@@ -236,7 +259,8 @@ void Run(bool selftest)
     // ============================== Shaders ==============================
     using var litProgram = LinkProgram(LitVert, LitFrag);       // scène + arme, éclairage Phong
     using var flatProgram = LinkProgram(FlatVert, FlatFrag);    // tracer / flash, couleur unie
-    using var overlayProgram = LinkProgram(OverlayVert, OverlayFrag); // viseur 2D en NDC
+    using var overlayProgram = LinkProgram(OverlayVert, OverlayFrag); // viseur/HUD/roue/menu 2D en NDC
+    using var texProgram = LinkProgram(TexVert, TexFrag);       // logo BRUTAL texturé dans le menu
 
     // ============================== Armes & gadgets ==============================
     // 4 armes hitscan différentes (roue au clic droit, ou touches 1-4).
@@ -259,6 +283,13 @@ void Run(bool selftest)
         reserveAmmo[i] = weapons[i].StartReserve;
     }
     var reloadingUntil = 0.0;
+    var reserveRegenAt = 0.0; // la réserve de munitions se régénère lentement (rechargement de réserve)
+
+    // Options (menu pause, touche O)
+    var menuOpen = false;
+    var menuIndex = 0;
+    var mouseSens = 1.0f; // multiplicateur de sensibilité souris (0.5..2.0)
+    var fovDeg = 75f;     // champ de vue (60..110)
 
     // Gadgets : E = utiliser, molette souris = changer. Grenade / Dash / Jetpack.
     var gadgets = new[] { "Grenade", "Dash", "Jetpack" };
@@ -358,6 +389,49 @@ void Run(bool selftest)
     OpenGl.VertexAttribute(new GlAttribute(0, 2, OpenGl.GL_FLOAT, GlScaling.Float, 2 * sizeof(float), 0));
     OpenGl.EnableVertexAttribArray(0);
 
+    // Logo BRUTAL charge depuis logo-brutal.png (credit requis par la licence MIT modifiee, clause 2.2).
+    GlTexture logoTex = default;
+    var logoOk = false;
+    try
+    {
+        using var img = Stb.Load("logo-brutal.png", 4);
+        logoOk = true;
+        logoTex = new GlTexture();
+        OpenGl.GenTextures([logoTex]);
+        OpenGl.BindTexture(OpenGl.GL_TEXTURE_2D, logoTex.Id);
+        OpenGl.TexParameterFloat(OpenGl.GL_TEXTURE_2D, OpenGl.GL_TEXTURE_MIN_FILTER, (int)OpenGl.GL_LINEAR);
+        OpenGl.TexParameterFloat(OpenGl.GL_TEXTURE_2D, OpenGl.GL_TEXTURE_MAG_FILTER, (int)OpenGl.GL_LINEAR);
+        OpenGl.TexParameterFloat(OpenGl.GL_TEXTURE_2D, OpenGl.GL_TEXTURE_WRAP_S, (int)OpenGl.GL_CLAMP_TO_EDGE);
+        OpenGl.TexParameterFloat(OpenGl.GL_TEXTURE_2D, OpenGl.GL_TEXTURE_WRAP_T, (int)OpenGl.GL_CLAMP_TO_EDGE);
+        unsafe
+        {
+            fixed (byte* p = img.AsSpan())
+                OpenGl.TexImage2D(OpenGl.GL_TEXTURE_2D, 0, (int)OpenGl.GL_RGBA, img.Width, img.Height, 0, OpenGl.GL_RGBA, OpenGl.GL_UNSIGNED_BYTE, p);
+        }
+    }
+    catch
+    {
+        logoOk = false; // retombe sur le texte "BRUTAL" dans le menu
+    }
+
+    // Quad texturé pour le logo (pos + uv entrelaces), place en haut du menu. v = 0 en haut de l'image.
+    var lw = 0.23f;                          // demi-largeur NDC du logo
+    var lh = lw * (168f / 712f);             // garde le ratio du PNG (712x168)
+    var lyTop = 0.66f; var lyBot = lyTop - 2f * lh;
+    (float2 Pos, float2 Uv)[] logoQuad =
+    [
+        (new float2(-lw, lyTop), new float2(0, 0)), (new float2(lw, lyTop), new float2(1, 0)), (new float2(lw, lyBot), new float2(1, 1)),
+        (new float2(-lw, lyTop), new float2(0, 0)), (new float2(lw, lyBot), new float2(1, 1)), (new float2(-lw, lyBot), new float2(0, 1)),
+    ];
+    var logoVao = OpenGl.GenVertexArray().Bind();
+    var logoVbo = OpenGl.GenBuffer();
+    logoVbo.Bind(GlBindTarget.ArrayBuffer);
+    OpenGl.BufferData(GlBindTarget.ArrayBuffer, logoQuad, GlBufferUsage.StaticDraw);
+    OpenGl.VertexAttribute(new GlAttribute(0, 2, OpenGl.GL_FLOAT, GlScaling.Float, 4 * sizeof(float), 0));
+    OpenGl.EnableVertexAttribArray(0);
+    OpenGl.VertexAttribute(new GlAttribute(1, 2, OpenGl.GL_FLOAT, GlScaling.Float, 4 * sizeof(float), 2 * sizeof(float)));
+    OpenGl.EnableVertexAttribArray(1);
+
     var labelBuf = new float2[8192];
     var weaponNames = new string[weapons.Length];
     for (var i = 0; i < weapons.Length; i++)
@@ -428,16 +502,16 @@ void Run(bool selftest)
         var dx = pos.X - lastMouse.X;
         var dy = pos.Y - lastMouse.Y;
         lastMouse = pos;
-        if (wheelOpen)
-            return; // la souris sert à choisir dans la roue, pas à viser
-        yaw += (float)(dx * 0.0024);
-        pitch = Math.Clamp(pitch - (float)(dy * 0.0024), -1.5f, 1.5f);
+        if (wheelOpen || menuOpen)
+            return; // la souris sert à choisir dans la roue / le menu, pas à viser
+        yaw += (float)(dx * 0.0024 * mouseSens);
+        pitch = Math.Clamp(pitch - (float)(dy * 0.0024 * mouseSens), -1.5f, 1.5f);
     };
     window.OnMouseButton += (_, button, action, _) =>
     {
-        if (button == GlfwMouseButton.Left && action == GlfwButtonAction.Press && !wheelOpen)
+        if (button == GlfwMouseButton.Left && action == GlfwButtonAction.Press && !wheelOpen && !menuOpen)
             shootQueued = true;
-        if (button == GlfwMouseButton.Right)
+        if (button == GlfwMouseButton.Right && !menuOpen)
         {
             if (action == GlfwButtonAction.Press)
                 wheelOpen = true;
@@ -458,7 +532,25 @@ void Run(bool selftest)
         if (action != GlfwKeyAction.Press)
             return;
         if (key == GlfwKey.Escape)
-            handle.ShouldClose = true;
+        {
+            if (menuOpen)
+                SetMenu(false); // Échap ferme le menu d'abord
+            else
+                handle.ShouldClose = true;
+            return;
+        }
+        if (menuOpen)
+        {
+            // navigation dans le menu Options : haut/bas = choisir, gauche/droite = ajuster, entrée = action
+            if (key == GlfwKey.Up) menuIndex = (menuIndex + 2) % 3;
+            else if (key == GlfwKey.Down) menuIndex = (menuIndex + 1) % 3;
+            else if (key == GlfwKey.Left) AdjustOption(-1);
+            else if (key == GlfwKey.Right) AdjustOption(1);
+            else if (key == GlfwKey.Enter && menuIndex == 2) SetMenu(false);
+            return;
+        }
+        if (key == GlfwKey.O)
+            SetMenu(true);
         else if (key == GlfwKey.E)
             gadgetQueued = true;
         else if (key == GlfwKey.R)
@@ -468,6 +560,22 @@ void Run(bool selftest)
         else if (key == GlfwKey.Number3) EquipWeapon(2);
         else if (key == GlfwKey.Number4) EquipWeapon(3);
     };
+
+    void SetMenu(bool open)
+    {
+        menuOpen = open;
+        // curseur visible dans le menu, capturé dans le jeu
+        window.SetInputMode(GlfwInputMode.Cursor, open ? Glfw.Constants.GLFW_CURSOR_NORMAL : Glfw.Constants.GLFW_CURSOR_DISABLED);
+    }
+
+    void AdjustOption(int dir)
+    {
+        switch (menuIndex)
+        {
+            case 0: mouseSens = Math.Clamp(mouseSens + dir * 0.1f, 0.5f, 2.0f); break;
+            case 1: fovDeg = Math.Clamp(fovDeg + dir * 5f, 60f, 110f); break;
+        }
+    }
 
     void EquipWeapon(int i)
     {
@@ -728,14 +836,18 @@ void Run(bool selftest)
         var dt = Math.Min(now - prevTime, 0.25);
         prevTime = now;
 
-        // --- entrées clavier ---
+        // --- entrées clavier (ignorées quand le menu est ouvert) ---
         var fwd = 0f;
         var strafe = 0f;
-        if (window.GetKey(GlfwKey.W) is GlfwKeyAction.Press or GlfwKeyAction.Repeat) fwd += 1;
-        if (window.GetKey(GlfwKey.S) is GlfwKeyAction.Press or GlfwKeyAction.Repeat) fwd -= 1;
-        if (window.GetKey(GlfwKey.D) is GlfwKeyAction.Press or GlfwKeyAction.Repeat) strafe += 1;
-        if (window.GetKey(GlfwKey.A) is GlfwKeyAction.Press or GlfwKeyAction.Repeat) strafe -= 1;
-        var sprint = window.GetKey(GlfwKey.LeftShift) is GlfwKeyAction.Press or GlfwKeyAction.Repeat;
+        var sprint = false;
+        if (!menuOpen)
+        {
+            if (window.GetKey(GlfwKey.W) is GlfwKeyAction.Press or GlfwKeyAction.Repeat) fwd += 1;
+            if (window.GetKey(GlfwKey.S) is GlfwKeyAction.Press or GlfwKeyAction.Repeat) fwd -= 1;
+            if (window.GetKey(GlfwKey.D) is GlfwKeyAction.Press or GlfwKeyAction.Repeat) strafe += 1;
+            if (window.GetKey(GlfwKey.A) is GlfwKeyAction.Press or GlfwKeyAction.Repeat) strafe -= 1;
+            sprint = window.GetKey(GlfwKey.LeftShift) is GlfwKeyAction.Press or GlfwKeyAction.Repeat;
+        }
 
         if (selftest)
         {
@@ -806,10 +918,18 @@ void Run(bool selftest)
                 wheelOpen = false;
                 currentWeapon = selectedSlot;
             }
+            // ouvre le menu OPTIONS entre les frames 500 et 560 (capture à 520)
+            menuOpen = frames is >= 500 and < 560;
             if (frames >= 900) window.ShouldClose = true;
         }
 
-        // --- physique à pas fixe ---
+        // --- physique à pas fixe (en pause quand le menu est ouvert) ---
+        if (menuOpen)
+        {
+            accumulator = 0;
+        }
+        else
+        {
         accumulator += dt;
         while (accumulator >= TIME_STEP)
         {
@@ -842,12 +962,22 @@ void Run(bool selftest)
             physicsSystem.Update(TIME_STEP, 1, tempAllocator, jobSystem);
             accumulator -= TIME_STEP;
         }
+        } // fin du else (!menuOpen) : physique en pause dans le menu
+
+        // --- rechargement passif de la réserve de munitions (+2 toutes les 1.5 s, cap au max) ---
+        if (!menuOpen && now >= reserveRegenAt)
+        {
+            reserveRegenAt = now + 1.5;
+            var wi = currentWeapon;
+            if (reserveAmmo[wi] < weapons[wi].StartReserve)
+                reserveAmmo[wi] = Math.Min(reserveAmmo[wi] + 2, weapons[wi].StartReserve);
+        }
 
         // --- tir ---
         if (shootQueued)
         {
             shootQueued = false;
-            if (now >= nextShotAt && !wheelOpen)
+            if (now >= nextShotAt && !wheelOpen && !menuOpen)
                 Shoot(now);
         }
 
@@ -855,14 +985,16 @@ void Run(bool selftest)
         if (gadgetQueued)
         {
             gadgetQueued = false;
-            UseGadget(now);
+            if (!menuOpen)
+                UseGadget(now);
         }
 
         // --- rechargement (touche R ou auto) ---
         if (reloadQueued)
         {
             reloadQueued = false;
-            StartReload(now);
+            if (!menuOpen)
+                StartReload(now);
         }
         if (reloadingUntil > 0 && now >= reloadingUntil)
         {
@@ -913,7 +1045,7 @@ void Run(bool selftest)
         var eye = Eye();
         var viewDir = ViewDir();
         var view = float4x4.CreateLookAt(eye, eye + viewDir, float3.UnitY);
-        var projection = float4x4.CreatePerspectiveFieldOfView(float.DegreesToRadians(75f), (float)WIDTH / HEIGHT, 0.1f, 200f);
+        var projection = float4x4.CreatePerspectiveFieldOfView(float.DegreesToRadians(fovDeg), (float)WIDTH / HEIGHT, 0.1f, 200f);
         var viewProjection = view * projection;
 
         OpenGl.Clear(GlClearBit.Color | GlClearBit.Depth);
@@ -1094,10 +1226,70 @@ void Run(bool selftest)
             OpenGl.Draw(GlTopology.Triangles, labelCount, 1, 0, 0);
             OpenGl.Disable(GlCapability.Blend);
         }
+
+        // menu OPTIONS (touche O) : fond assombri + logo BRUTAL + notice licence + options réglables
+        if (menuOpen)
+        {
+            OpenGl.Disable(GlCapability.DepthTest);
+            OpenGl.Enable(GlCapability.Blend);
+            OpenGl.BlendFunc(OpenGl.GL_SRC_ALPHA, OpenGl.GL_ONE_MINUS_SRC_ALPHA);
+
+            void MenuLine(string text, float x, float y, float px, float4 color)
+            {
+                var n = AddText(labelBuf, 0, text, x, y, px);
+                textVbo.Bind(GlBindTarget.ArrayBuffer);
+                OpenGl.BufferData(GlBindTarget.ArrayBuffer, labelBuf.AsSpan(0, n), GlBufferUsage.DynamicDraw);
+                textVao.Bind();
+                overlayProgram.Uniform("color"u8, color);
+                OpenGl.Draw(GlTopology.Triangles, n, 1, 0, 0);
+            }
+
+            void MenuLineC(string text, float y, float px, float4 color) // centrée horizontalement
+            {
+                MenuLine(text, -((text.Length * 6 - 1) * px) / 2f, y, px, color);
+            }
+
+            overlayProgram.Use();
+            overlayProgram.Uniform("color"u8, new float4(0f, 0f, 0f, 0.78f));
+            fullVao.Bind();
+            OpenGl.Draw(GlTopology.Triangles, 6, 1, 0, 0);
+
+            // logo BRUTAL en haut du menu (credit requis par la licence, clause 2.2)
+            if (logoOk)
+            {
+                texProgram.Use();
+                OpenGl.BindTexture(OpenGl.GL_TEXTURE_2D, logoTex.Id);
+                logoVao.Bind();
+                OpenGl.Draw(GlTopology.Triangles, 6, 1, 0, 0);
+                overlayProgram.Use();
+            }
+            else
+            {
+                MenuLineC("BRUTAL", 0.54f, 0.065f, new float4(1f, 1f, 1f, 1f));
+            }
+
+            const float MPX = 0.014f;
+            var white = new float4(0.92f, 0.94f, 1f, 1f);
+            var orange = new float4(1f, 0.65f, 0.15f, 1f);
+            MenuLineC("OPTIONS", 0.44f, MPX, orange);
+            var optNames = new[] { $"SENSIBILITE {mouseSens * 100:F0}%", $"CHAMP DE VUE {fovDeg:F0} DEG", "RETOUR" };
+            for (var i = 0; i < optNames.Length; i++)
+                MenuLineC(optNames[i], 0.28f - i * 0.11f, MPX, i == menuIndex ? orange : white);
+
+            // notice BRUTAL : la licence MIT modifiee exige le credit du logo (2.2) et une copie de la licence (2.3)
+            const float NPX = 0.004f;
+            var grey = new float4(0.75f, 0.75f, 0.8f, 1f);
+            MenuLineC("FRAMEWORK BRUTAL (C) 2024 AHWOO LIMITED - LICENCE MIT MODIFIEE", -0.52f, NPX, grey);
+            MenuLineC("LOGO BRUTAL AFFICHE CI-DESSUS - CREDIT REQUIS (LICENCE 2.2)", -0.585f, NPX, grey);
+            MenuLineC("COPIE DE LA LICENCE LIVREE AVEC LE JEU - NOTICE.TXT (LICENCE 2.3)", -0.65f, NPX, grey);
+            MenuLineC("JEU CONSTRUIT AVEC BRUTAL (AHWOO - ROCKETWERKZ) - GITHUB.COM/AHWOOTECH/BRUTAL", -0.715f, NPX, grey);
+            MenuLineC("O - ECHAP - ENTREE FERMENT LE MENU - FLECHES HAUT BAS CHOISIR - GAUCHE DROITE REGLER", -0.86f, NPX, orange);
+            OpenGl.Disable(GlCapability.Blend);
+        }
         OpenGl.Enable(GlCapability.DepthTest);
 
         // En selftest, on sauvegarde des frames du framebuffer en PNG (preuve du rendu).
-        if (selftest && (frames is 30 or 150 or 310 or 420 or 600 || frames == captureAt))
+        if (selftest && (frames is 30 or 150 or 310 or 420 or 520 or 600 || frames == captureAt))
         {
             var pixels = new byte[WIDTH * HEIGHT * 4];
             unsafe
@@ -1147,8 +1339,10 @@ void Run(bool selftest)
             $"SELFTEST DONE frames={frames} shouldClose={window.ShouldClose} score={score} shots={shots} hits={hits} playerPos=({endPos.X:F2}, {endPos.Y:F2}, {endPos.Z:F2})");
 
     // ============================== Nettoyage ==============================
-    OpenGl.DeleteVertexArrays([cubeVao, crossVao, ringVao, centerVao, fullVao, pointerVao, textVao]);
-    OpenGl.DeleteBuffers([cubeVbo, crossVbo, ringVbo, centerVbo, fullVbo, pointerVbo, textVbo]);
+    OpenGl.DeleteVertexArrays([cubeVao, crossVao, ringVao, centerVao, fullVao, pointerVao, textVao, logoVao]);
+    OpenGl.DeleteBuffers([cubeVbo, crossVbo, ringVbo, centerVbo, fullVbo, pointerVbo, textVbo, logoVbo]);
+    if (logoOk)
+        OpenGl.DeleteTextures([logoTex]);
 
     foreach (var (gb, _) in grenades)
     {
