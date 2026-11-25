@@ -1,0 +1,51 @@
+name: Release
+
+# Publie une release GitHub avec l'exe autonome win-x64 (zip) :
+#   - automatiquement à chaque push de tag v* (ex: git tag v1.1.0 && git push origin v1.1.0)
+#   - ou manuellement depuis l'onglet Actions (bouton "Run workflow", champ tag)
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag de la release (ex : v1.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Build win-x64 + release
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Installer le .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Publier l'exe autonome (win-x64, single-file NativeAOT)
+        run: dotnet publish FpsBrutal.cs -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o publish
+
+      - name: Copier NOTICE.txt et README.md à côté de l'exe (licence BRUTAL)
+        shell: pwsh
+        run: Copy-Item NOTICE.txt, README.md publish/
+
+      - name: Zipper le dossier publish (sans le .pdb)
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem publish | Where-Object { $_.Extension -ne '.pdb' }
+          Compress-Archive -Path $files.FullName -DestinationPath FpsBrutal-win-x64.zip -Force
+
+      - name: Créer la release GitHub avec le zip
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: FpsBrutal-win-x64.zip
+          generate_release_notes: true
